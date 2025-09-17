@@ -1,15 +1,16 @@
 # app_pg.py — Contas a Pagar (Streamlit + PostgreSQL)
 # ---------------------------------------------------
-# Como rodar local:
+# Como rodar local/na nuvem:
 # 1) pip install -r requirements.txt
-# 2) streamlit run app_pg.py
+# 2) Configure secrets TOML com as chaves [postgres]
+# 3) streamlit run app_pg.py
 # ---------------------------------------------------
 
 from contextlib import contextmanager
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from io import StringIO
-import os, uuid
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -17,10 +18,9 @@ import psycopg2
 from psycopg2 import pool
 
 # =============================
-# Config & Constantes
+# Config & constantes
 # =============================
 
-# Lista fixa de empresas (edite como preferir)
 EMPRESAS = [
     "Libra Agente Autônomo",
     "Libra Banco",
@@ -38,18 +38,17 @@ EMPRESAS = [
 BRL = st.column_config.NumberColumn("Valor (R$)", format="R$ %,.2f")
 DATE_COL = st.column_config.DateColumn("Data", format="DD/MM/YYYY")
 
-# =============================
-# Helpers gerais
-# =============================
 
 def force_rerun():
+    """Força recarregamento da página após uma ação."""
     try:
         st.rerun()
     except Exception:
         st.experimental_rerun()
 
+
 # =============================
-# Conexão PostgreSQL (pool)
+# Conexão com Postgres (pool)
 # =============================
 
 @st.cache_resource(show_spinner=False)
@@ -57,7 +56,7 @@ def get_pool():
     cfg = st.secrets["postgres"]
     return pool.SimpleConnectionPool(
         minconn=1,
-        maxconn=5,
+        maxconn=6,
         host=cfg["host"],
         port=cfg.get("port", 5432),
         dbname=cfg["dbname"],
@@ -65,6 +64,7 @@ def get_pool():
         password=cfg["password"],
         sslmode=cfg.get("sslmode", "require"),
     )
+
 
 @contextmanager
 def get_conn():
@@ -75,10 +75,15 @@ def get_conn():
     finally:
         _pool.putconn(conn)
 
+
+# =============================
+# Inicialização / migração DB
+# =============================
+
 def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
-        # cria tabela com tipos corretos para Postgres
+        # Tabela principal
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS boletos (
@@ -91,16 +96,19 @@ def init_db():
                 banco TEXT,
                 setor TEXT,
                 status TEXT NOT NULL DEFAULT 'A_PAGAR',  -- A_PAGAR | PAGO | CANCELADO
-                data_pagamento DATE,
+                data_pagamento DATE,                     -- null se não pago
                 obs TEXT,
-                arquivo BYTEA,           -- PDF binário
-                arquivo_nome TEXT        -- nome do arquivo original (para download)
+                arquivo BYTEA,                           -- PDF em bytes
+                arquivo_nome TEXT                        -- nome amigável do arquivo
             );
             """
         )
+        # Índices úteis
         cur.execute("CREATE INDEX IF NOT EXISTS idx_boletos_vcto ON boletos(data_vencimento);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_boletos_emp ON boletos(empresa_pagadora);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_boletos_emp  ON boletos(empresa_pagadora);")
         conn.commit()
+        cur.close()
+
 
 # =============================
 # CRUD
@@ -118,24 +126,32 @@ def insert_boleto(payload: dict):
             ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
-                payload["data_registro"],   # 'YYYY-MM-DD'
+                payload["data_registro"],
                 payload["empresa_pagadora"],
                 float(payload["valor"]),
-                payload["data_vencimento"], # 'YYYY-MM-DD'
+                payload["data_vencimento"],
                 payload.get("beneficiario", ""),
                 payload.get("banco", ""),
                 payload.get("setor", ""),
                 payload.get("status", "A_PAGAR"),
                 payload.get("data_pagamento"),
                 payload.get("obs", ""),
-                payload.get("arquivo_bytes"),    # bytes ou None
-                payload.get("arquivo_nome"),     # nome ou None
+                payload.get("arquivo_bytes"),
+                payload.get("arquivo_nome"),
             ),
         )
         conn.commit()
+        cur.close()
+
 
 def fetch_boletos(filters: dict | None = None) -> pd.DataFrame:
-    base_sql = "SELECT * FROM boletos WHERE 1=1"
+    base_sql = """
+        SELECT
+            id, data_registro, empresa_pagadora, valor, data_vencimento,
+            beneficiario, banco, setor, status, data_pagamento, obs, arquivo_nome
+        FROM boletos
+        WHERE 1=1
+    """
     params = []
 
     if filters:
@@ -164,11 +180,30 @@ def fetch_boletos(filters: dict | None = None) -> pd.DataFrame:
 
     with get_conn() as conn:
         df = pd.read_sql_query(base_sql, conn, params=params)
+
     if not df.empty:
         for col in ["data_registro", "data_vencimento", "data_pagamento"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
     return df
+
+
+def fetch_pdf(id_: int):
+    """Busca o PDF (BYTEA) e o nome do arquivo para download."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT arquivo, arquivo_nome FROM boletos WHERE id = %s", (id_,))
+        row = cur.fetchone()
+        cur.close()
+    if not row:
+        return None, None
+    arquivo_bytes, arquivo_nome = row
+    if arquivo_bytes is None:
+        return None, None
+    if not arquivo_nome:
+        arquivo_nome = f"boleto_{id_}.pdf"
+    return arquivo_bytes, arquivo_nome
+
 
 def update_rows(df_updated: pd.DataFrame, edited_rows: list[int]):
     if not edited_rows:
@@ -200,6 +235,8 @@ def update_rows(df_updated: pd.DataFrame, edited_rows: list[int]):
                 ),
             )
         conn.commit()
+        cur.close()
+
 
 def delete_by_ids(ids: list[int]):
     if not ids:
@@ -207,17 +244,10 @@ def delete_by_ids(ids: list[int]):
     with get_conn() as conn:
         cur = conn.cursor()
         marks = ",".join(["%s"] * len(ids))
-        cur.execute(f"DELETE FROM boletos WHERE id IN ({marks})", ids)
+        cur.execute(f"DELETE FROM boletos WHERE id IN ({marks})", tuple(ids))
         conn.commit()
+        cur.close()
 
-def fetch_pdf(id_: int):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT arquivo, arquivo_nome FROM boletos WHERE id = %s", (id_,))
-        row = cur.fetchone()
-    if not row or row[0] is None:
-        return None, None
-    return row[0], row[1] or f"boleto_{id_}.pdf"
 
 # =============================
 # UI — Streamlit
@@ -227,11 +257,16 @@ st.set_page_config(page_title="Contas a Pagar", page_icon="💸", layout="wide")
 init_db()
 
 st.title("💸 Contas a Pagar — Grupo Empresarial")
+
 page = st.sidebar.radio("Navegação", ["Adicionar Boleto", "Dashboard"], index=0)
 
-# botão de refresh manual
+# 🔄 botão de refresh manual na sidebar
 if st.sidebar.button("🔄 Atualizar página"):
     force_rerun()
+
+# Paleta/formatadores
+BRL = st.column_config.NumberColumn("Valor (R$)", format="R$ %,.2f")
+DATE_COL = st.column_config.DateColumn("Data", format="DD/MM/YYYY")
 
 # =============================
 # Página: Adicionar Boleto
@@ -242,8 +277,9 @@ if page == "Adicionar Boleto":
         col1, col2, col3 = st.columns(3)
         with col1:
             data_registro = st.date_input("Data de registro", value=date.today())
+            # select padronizado
             empresa_pagadora = st.selectbox("Empresa pagadora", EMPRESAS, index=0)
-            valor = st.number_input("Valor do boleto (R$)", min_value=0.0, step=100.0)
+            valor = st.number_input("Valor do boleto (R$)", min_value=0.0, step=0.01, format="%.2f")
         with col2:
             data_vencimento = st.date_input("Data de vencimento", value=date.today() + relativedelta(days=7))
             beneficiario = st.text_input("Beneficiário", placeholder="Ex: Fornecedor XYZ")
@@ -258,10 +294,11 @@ if page == "Adicionar Boleto":
 
         submitted = st.form_submit_button("➕ Adicionar Boleto")
         if submitted:
-            arquivo_bytes, arquivo_nome = (None, None)
+            # Prepara bytes e nome do PDF (BYTEA)
+            arquivo_bytes = None
+            arquivo_nome = None
             if pdf is not None:
                 arquivo_bytes = pdf.read()
-                # nome amigável (opcional)
                 safe_benef = (beneficiario or "boleto").replace("/", "-").replace("\\", "-")
                 arquivo_nome = f"{date.today().isoformat()}_{uuid.uuid4().hex[:8]}_{safe_benef}.pdf"
 
@@ -279,6 +316,7 @@ if page == "Adicionar Boleto":
                 "arquivo_bytes": arquivo_bytes,
                 "arquivo_nome": arquivo_nome,
             }
+            # validações simples
             if not payload["empresa_pagadora"]:
                 st.error("Informe a *Empresa pagadora*.")
             elif payload["valor"] <= 0:
@@ -296,7 +334,7 @@ if page == "Adicionar Boleto":
 else:
     st.subheader("Dashboard e Controle")
 
-    # filtros
+    # --- Filtros (1ª camada: datas/status) ---
     with st.expander("🔎 Filtros", expanded=True):
         colf1, colf2, colf3 = st.columns(3)
         with colf1:
@@ -307,12 +345,15 @@ else:
             status_list = st.multiselect("Status", ["A_PAGAR", "PAGO", "CANCELADO"], default=["A_PAGAR", "PAGO"])
 
         df_all = fetch_boletos(
-            {"dt_ini": dt_ini.strftime("%Y-%m-%d"),
-             "dt_fim": dt_fim.strftime("%Y-%m-%d"),
-             "status_list": status_list}
+            {
+                "dt_ini": dt_ini.strftime("%Y-%m-%d"),
+                "dt_fim": dt_fim.strftime("%Y-%m-%d"),
+                "status_list": status_list,
+            }
         )
 
-        emp_opts = EMPRESAS
+        # --- Filtros (2ª camada: empresa/beneficiário/setor) ---
+        emp_opts = EMPRESAS  # padronizado
         ben_opts = sorted(df_all["beneficiario"].dropna().unique().tolist()) if not df_all.empty else []
         set_opts = sorted(df_all["setor"].dropna().unique().tolist()) if not df_all.empty else []
 
@@ -324,6 +365,7 @@ else:
         with colff3:
             setor_list = st.multiselect("Setor(es)", set_opts, default=set_opts)
 
+        # aplica filtros adicionais
         df = df_all.copy()
         if empresa_list:
             df = df[df["empresa_pagadora"].isin(empresa_list)]
@@ -332,14 +374,17 @@ else:
         if setor_list:
             df = df[df["setor"].isin(setor_list)]
 
-    # KPIs
+    # --- KPIs ---
     c1, c2, c3, c4 = st.columns(4)
     total_a_pagar = float(df.loc[df["status"] == "A_PAGAR", "valor"].sum()) if not df.empty else 0.0
-    total_pago    = float(df.loc[df["status"] == "PAGO", "valor"].sum()) if not df.empty else 0.0
-    qtd_boletos   = int(df.shape[0]) if not df.empty else 0
-    prox_7 = float(df.loc[(df["status"] == "A_PAGAR") &
-                          (df["data_vencimento"] <= pd.Timestamp.today() + pd.Timedelta(days=7)),
-                          "valor"].sum()) if not df.empty else 0.0
+    total_pago = float(df.loc[df["status"] == "PAGO", "valor"].sum()) if not df.empty else 0.0
+    qtd_boletos = int(df.shape[0]) if not df.empty else 0
+    prox_7 = float(
+        df.loc[
+            (df["status"] == "A_PAGAR") & (df["data_vencimento"] <= pd.Timestamp.today() + pd.Timedelta(days=7)),
+            "valor",
+        ].sum()
+    ) if not df.empty else 0.0
 
     c1.metric("A pagar (período)", f"R$ {total_a_pagar:,.2f}")
     c2.metric("Pago (período)", f"R$ {total_pago:,.2f}")
@@ -348,7 +393,7 @@ else:
 
     st.divider()
 
-    # Matriz Empresa x Data
+    # --- Matriz (Empresa x Data) ---
     st.markdown("### 📊 Matriz Empresa × Data")
     if df.empty:
         st.warning("Sem dados para o filtro selecionado.")
@@ -357,9 +402,10 @@ else:
         col_date = "data_vencimento" if usar_data == "Data de vencimento" else "data_pagamento"
         df_plot = df.copy()
         if col_date == "data_pagamento":
-            df_plot = df_plot[df_plot["status"] == "PAGO"]
+            df_plot = df_plot[df_plot["status"] == "PAGO"]  # somente pagos têm data_pagamento
         df_plot = df_plot.dropna(subset=[col_date])
 
+        # garante coluna somente com data (sem hora)
         df_plot["dia"] = df_plot[col_date].dt.date
         pivot = pd.pivot_table(
             df_plot,
@@ -369,18 +415,24 @@ else:
             aggfunc="sum",
             fill_value=0.0,
         )
-        pivot = pivot.sort_index().reindex(sorted(pivot.columns), axis=1)
-        st.dataframe(pivot, use_container_width=True)
+        pivot = pivot.sort_index()
+        pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+
+        st.dataframe(
+            pivot,
+            use_container_width=True,
+        )
 
     st.divider()
 
-    # Editor inline
+    # --- Editor de dados (inline) ---
     st.markdown("### ✏️ Edição Rápida (status, datas, etc.)")
     df_edit = df.copy()
     if not df_edit.empty:
-        df_edit = df_edit.sort_values(["data_vencimento", "empresa_pagadora", "beneficiario"])
+        df_edit = df_edit.sort_values(["data_vencimento", "empresa_pagadora", "beneficiario"])  # ordenação útil
         cfg = {
             "id": st.column_config.NumberColumn("ID"),
+            # usa SelectboxColumn se todos os valores estão na lista EMPRESAS; senão, deixa TextColumn para não travar
             "empresa_pagadora": (
                 st.column_config.SelectboxColumn("Empresa", options=EMPRESAS)
                 if set(df_edit["empresa_pagadora"].dropna().unique()).issubset(set(EMPRESAS)) and len(EMPRESAS) > 0
@@ -394,10 +446,17 @@ else:
             "data_registro": DATE_COL,
             "data_vencimento": DATE_COL,
             "data_pagamento": DATE_COL,
+            "arquivo_nome": st.column_config.TextColumn("Arquivo (nome)", help="Nome do PDF anexado, se houver"),
             "obs": st.column_config.TextColumn("Observações"),
         }
-        edited = st.data_editor(df_edit, column_config=cfg, num_rows="fixed",
-                                use_container_width=True, key="editor1")
+        edited = st.data_editor(
+            df_edit,
+            column_config=cfg,
+            num_rows="fixed",
+            use_container_width=True,
+            key="editor1",
+        )
+        # Identifica linhas alteradas
         changed_rows = [i for i in range(len(df_edit)) if not edited.iloc[i].equals(df_edit.iloc[i])]
         colb1, colb2, colb3 = st.columns([1, 1, 6])
         with colb1:
@@ -412,7 +471,7 @@ else:
                 st.warning("Registros excluídos.")
                 force_rerun()
 
-    # Importador CSV
+    # --- Importador CSV ---
     st.divider()
     st.markdown("### ⬆️ Importar CSV de boletos")
     st.caption(
@@ -428,6 +487,7 @@ else:
             df_csv = pd.read_csv(StringIO(raw), sep=",")
 
         cols = {c.strip().lower(): c for c in df_csv.columns}
+
         def find_col(*aliases):
             for a in aliases:
                 if a in cols:
@@ -435,12 +495,12 @@ else:
             return None
 
         c_data = find_col("data", "data registro", "data_registro")
-        c_emp  = find_col("empresa pagadora", "empresa", "empresa_pagadora")
-        c_val  = find_col("valor boleto", "valor", "valor_boleto")
-        c_vct  = find_col("data vencimento", "vencimento", "data_vencimento")
-        c_ben  = find_col("beneficiário", "beneficiario")
-        c_bco  = find_col("banco")
-        c_set  = find_col("setor")
+        c_emp = find_col("empresa pagadora", "empresa", "empresa_pagadora")
+        c_val = find_col("valor boleto", "valor", "valor_boleto")
+        c_vct = find_col("data vencimento", "vencimento", "data_vencimento")
+        c_ben = find_col("beneficiário", "beneficiario")
+        c_bco = find_col("banco")
+        c_set = find_col("setor")
 
         required = [c_data, c_emp, c_val, c_vct, c_ben]
         if any(c is None for c in required):
@@ -459,6 +519,7 @@ else:
 
             inserted = 0
             for _, r in df_csv.iterrows():
+                # padroniza empresa: tenta casar com EMPRESAS (case-insensitive)
                 raw_emp = str(r[c_emp]).strip()
                 emp_pad = next((e for e in EMPRESAS if e.lower() == raw_emp.lower()), raw_emp)
 
@@ -485,41 +546,40 @@ else:
             st.success(f"Importação concluída. Registros inseridos: {inserted}.")
             force_rerun()
 
-    # Exportar CSV
+    # --- Exportar CSV ---
     if not df.empty:
         st.download_button(
             "📥 Baixar CSV (dados filtrados)",
-            data=df.drop(columns=["arquivo","arquivo_nome"], errors="ignore").to_csv(index=False, sep=";", decimal=","),
+            data=df.to_csv(index=False, sep=";", decimal=","),
             file_name=f"contas_a_pagar_{date.today().isoformat()}.csv",
             mime="text/csv",
         )
 
-    # Downloads de PDFs (BYTEA)
+    # --- Downloads de PDFs anexados ---
     st.divider()
     st.markdown("### 📎 Boletos anexados (PDF)")
     if df.empty:
         st.caption("Sem anexos para os filtros atuais.")
     else:
-        anexos = df.copy()
-        anexos = anexos[anexos["id"].notna()]  # garantia
-        if anexos.empty:
+        # Busca apenas IDs do df filtrado e gera botões
+        anexos_df = df[["id", "beneficiario", "empresa_pagadora", "data_vencimento", "valor"]].copy()
+        if anexos_df.empty:
             st.caption("Sem anexos para os filtros atuais.")
         else:
-            for _, r in anexos.iterrows():
-                # buscamos o PDF sob demanda para não carregar tudo na memória
-                pdf_bytes, fname = fetch_pdf(int(r["id"]))
+            for _, r in anexos_df.iterrows():
+                pdf_bytes, pdf_name = fetch_pdf(int(r["id"]))
                 if not pdf_bytes:
                     continue
-                colA, colB, colC, colD = st.columns([4,3,3,2])
-                colA.write(f"**ID {int(r['id'])}** — {r.get('beneficiario','')} — {r.get('empresa_pagadora','')}")
-                dtv = r['data_vencimento'].date() if pd.notna(r['data_vencimento']) else '-'
-                colB.write(f"Venc.: {dtv}")
-                val = float(r.get('valor', 0.0))
-                colC.write(f"Valor: R$ {val:,.2f}")
+                colA, colB, colC, colD = st.columns([4, 3, 3, 2])
+                colA.write(f"**ID {int(r['id'])}** — {r['beneficiario']} — {r['empresa_pagadora']}")
+                colB.write(f"Venc.: {r['data_vencimento'].date() if pd.notna(r['data_vencimento']) else '-'}")
+                colC.write(f"Valor: R$ {float(r['valor']):,.2f}")
                 colD.download_button(
                     "⬇️ Baixar PDF",
-                    data=bytes(pdf_bytes),
-                    file_name=fname,
+                    data=pdf_bytes,
+                    file_name=pdf_name,
                     mime="application/pdf",
-                    key=f"dl_{int(r['id'])}"
+                    key=f"dl_{int(r['id'])}",
                 )
+
+# Fim do app_pg.py
