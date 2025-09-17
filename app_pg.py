@@ -268,47 +268,6 @@ st.set_page_config(page_title="Contas a Pagar", page_icon="💸", layout="wide")
 init_db()
 
 
-
-
-
-
-def img_to_base64(path: str) -> str:
-    p = Path(path)
-    if not p.exists():
-        # opcional: mostra aviso, mas não quebra o app
-        st.warning(f"Logo não encontrado em: {p}")
-        return ""
-    return base64.b64encode(p.read_bytes()).decode()
-
-# ajuste o caminho conforme seu repo
-LOGO_PATH = "Imagens/LOGO-LIBRA_HORIZONTAL_PETROLEO.png"
-logo_b64 = img_to_base64(LOGO_PATH)
-
-if logo_b64:
-    st.markdown(
-        f"""
-        <style>
-        .libra-logo {{
-            position: fixed;
-            top: 12px;
-            right: 16px;
-            z-index: 10000;
-        }}
-        .libra-logo img {{
-            width: 160px;          /* ajuste o tamanho se quiser */
-            opacity: 0.98;
-            pointer-events: none;  /* evita clique arrastar */
-        }}
-        </style>
-        <div class="libra-logo">
-            <img src="data:image/png;base64,{logo_b64}" alt="Libra" />
-        </div>
-        """,
-        unsafe_allow_html=True,)
-    
-
-
-
 st.title("💸 Contas a Pagar — Grupo Empresarial")
 
 page = st.sidebar.radio("Navegação", ["Adicionar Boleto", "Dashboard"], index=0)
