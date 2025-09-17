@@ -265,6 +265,33 @@ def delete_by_ids(ids: list[int]):
 st.set_page_config(page_title="Contas a Pagar", page_icon="💸", layout="wide")
 init_db()
 
+# Logo no canto superior direito
+logo_path = "Imagens/LOGO-LIBRA_HORIZONTAL_PETROLEO.png"
+
+
+
+st.markdown(
+    f"""
+    <style>
+        [data-testid="stAppViewContainer"]::before {{
+            content: "";
+            position: fixed;
+            top: 10px;
+            right: 15px;
+            width: 180px;   /* ajuste o tamanho */
+            height: 60px;   /* ajuste o tamanho */
+            background-image: url('data:image/png;base64,{open(logo_path, "rb").read().encode("base64").decode()}');
+            background-size: contain;
+            background-repeat: no-repeat;
+            z-index: 100;
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+
 st.title("💸 Contas a Pagar — Grupo Empresarial")
 
 page = st.sidebar.radio("Navegação", ["Adicionar Boleto", "Dashboard"], index=0)
