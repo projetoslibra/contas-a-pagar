@@ -268,7 +268,7 @@ st.set_page_config(page_title="Contas a Pagar", page_icon="💸", layout="wide")
 init_db()
 
 
-st.title("💸 Contas a Pagar — Grupo Empresarial")
+st.title("💸 Contas a Pagar — Grupo Libra")
 
 page = st.sidebar.radio("Navegação", ["Adicionar Boleto", "Dashboard"], index=0)
 
