@@ -11,6 +11,8 @@ from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from io import StringIO
 import uuid
+import base64
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -265,30 +267,45 @@ def delete_by_ids(ids: list[int]):
 st.set_page_config(page_title="Contas a Pagar", page_icon="💸", layout="wide")
 init_db()
 
-# Logo no canto superior direito
-logo_path = "Imagens/LOGO-LIBRA_HORIZONTAL_PETROLEO.png"
 
 
 
-st.markdown(
-    f"""
-    <style>
-        [data-testid="stAppViewContainer"]::before {{
-            content: "";
+
+
+def img_to_base64(path: str) -> str:
+    p = Path(path)
+    if not p.exists():
+        # opcional: mostra aviso, mas não quebra o app
+        st.warning(f"Logo não encontrado em: {p}")
+        return ""
+    return base64.b64encode(p.read_bytes()).decode()
+
+# ajuste o caminho conforme seu repo
+LOGO_PATH = "Imagens/LOGO-LIBRA_HORIZONTAL_PETROLEO.png"
+logo_b64 = img_to_base64(LOGO_PATH)
+
+if logo_b64:
+    st.markdown(
+        f"""
+        <style>
+        .libra-logo {{
             position: fixed;
-            top: 10px;
-            right: 15px;
-            width: 180px;   /* ajuste o tamanho */
-            height: 60px;   /* ajuste o tamanho */
-            background-image: url('data:image/png;base64,{open(logo_path, "rb").read().encode("base64").decode()}');
-            background-size: contain;
-            background-repeat: no-repeat;
-            z-index: 100;
+            top: 12px;
+            right: 16px;
+            z-index: 10000;
         }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+        .libra-logo img {{
+            width: 160px;          /* ajuste o tamanho se quiser */
+            opacity: 0.98;
+            pointer-events: none;  /* evita clique arrastar */
+        }}
+        </style>
+        <div class="libra-logo">
+            <img src="data:image/png;base64,{logo_b64}" alt="Libra" />
+        </div>
+        """,
+        unsafe_allow_html=True,)
+    
 
 
 
