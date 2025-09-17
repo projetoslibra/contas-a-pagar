@@ -200,6 +200,15 @@ def fetch_pdf(id_: int):
     arquivo_bytes, arquivo_nome = row
     if arquivo_bytes is None:
         return None, None
+    
+        # 🔧 Converte memoryview/bytearray/etc. para bytes
+    if isinstance(arquivo_bytes, memoryview):
+        arquivo_bytes = arquivo_bytes.tobytes()
+    elif not isinstance(arquivo_bytes, (bytes, bytearray)):
+        arquivo_bytes = bytes(arquivo_bytes)
+    else:
+        arquivo_bytes = bytes(arquivo_bytes)  # garante tipo bytes
+
     if not arquivo_nome:
         arquivo_nome = f"boleto_{id_}.pdf"
     return arquivo_bytes, arquivo_nome
